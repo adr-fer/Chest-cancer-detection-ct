@@ -1,0 +1,79 @@
+# Import required AWS Glue and PySpark libraries
+import sys
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from pyspark.sql.functions import col
+
+
+# Initialize Glue job context
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+
+
+# Read raw clinical notes table from Glue Data Catalog
+raw_dyf = glueContext.create_dynamic_frame.from_catalog( 
+    database="hcc",
+    table_name="clinical_notes"
+)
+
+
+
+# Convert DynamicFrame to Spark DataFrame
+raw_df = raw_dyf.toDF()
+df = raw_dyf.toDF()
+
+
+
+# Preview initial structure
+print("Initial columns:", df.columns)
+df.show(5, truncate=False)
+
+
+
+# Rename generic columns if needed
+from pyspark.sql.functions import col, lower
+if set(["col0", "col1", "col2"]).issubset(set(df.columns)):
+    df = (df
+          .withColumnRenamed("col0", "encounter_id")
+          .withColumnRenamed("col1", "note_type")
+          .withColumnRenamed("col2", "note_text")
+    )
+
+
+
+# Remove accidental header rows inside the data
+df = df.filter(~(
+    (lower(col("encounter_id")) == "encounter_id") |
+    (lower(col("note_type")) == "note_type")|
+    (lower(col("note_text")) == "note_text")
+))
+
+
+
+# Standardize column names
+for c in raw_df.columns: 
+    new_c = c.strip().lower().replace(" ", "_")
+    raw_df = raw_df.withColumnRenamed(c, new_c)
+
+
+# Count rows before and after duplicate remova
+df_before = df.count()                                           
+df = df.dropDuplicates()                                         
+df_after = df.count()                                            
+
+print("Rows before removing duplicates:", df_before)  
+print("Rows after removing duplicates:", df_after)               
+print("Duplicates removed:", df_before - df_after)    
+
+
+# Write cleaned data to curated S3 layer in Parquet format
+curated_path = "s3://healthcare-risk-prediction-pipeline/CURATED/Clinical_Notes/"
+df.write.mode("overwrite").parquet(curated_path)
+
